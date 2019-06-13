@@ -29,6 +29,45 @@ def get_creds_from_file(file, array):
             password = xs[2]
     return (user, password)
 
+def walk_dir(rubrik_api, snap_id, path, parent_ent):
+    tree_size[path] = 0
+    tree_files[path] = 0
+    offset = 0
+    done = False
+    while not done:
+        params = {"path": path, "offset": offset}
+        print params
+        print snap_id
+        rubrik_walk = rubrik_api.get('v1', '/fileset/snapshot/' + str(snap_id) + '/browse', params=params)
+        for dir_ent in rubrik_walk['data']:
+            offset += 1
+            if dir_ent == parent_ent:
+                return(tree_size[path], tree_files[path])
+            if dir_ent['fileMode'] == "file":
+                tree_files[path] += 1
+                tree_size[path] += int(dir_ent['size'])
+            elif dir_ent['fileMode'] == "directory" or dir_ent['fileMode'] == "drive":
+                tree_files[path] += 1
+                if dir_ent['fileMode'] == "drive":
+                    new_path = dir_ent['filename']
+                elif share_type == 'NFS':
+                    if path != "/":
+                        new_path = path + "/" + dir_ent['path']
+                    else:
+                        new_path = "/" + dir_ent['path']
+                else:
+                    if path != "\\":
+                        new_path = path + "\\" + dir_ent['path']
+                    else:
+                        new_path = "\\" + dir_ent['path']
+                (tree_size[new_path], tree_files[new_path]) = walk_dir(rubrik_api, snap_id, new_path, dir_ent)
+                tree_size[path] += tree_size[new_path]
+                tree_files[path] += tree_files[new_path]
+        if not rubrik_walk['hasMore']:
+            done = True
+    return (tree_size[path], tree_files[path])
+
+
 if __name__ == "__main__":
     user = ""
     password = ""
@@ -38,11 +77,16 @@ if __name__ == "__main__":
     fs_id = ""
     snap_date = "1970-01-01T01:00"
     date_flag = False
-    slf = []
     snap_id = ""
     depth = 0
+    path = "/"
+    done = False
+    tree_files = {}
+    tree_size = {}
+    fs_type = ""
+    hs_id = ""
 
-    optlist, args = getopt.getopt(sys.argv[1:], 'hc:t:d', ['--help', '--creds=', '--timestamp=', '--depth'])
+    optlist, args = getopt.getopt(sys.argv[1:], 'hc:t:dp:', ['--help', '--creds=', '--timestamp=', '--depth=', '--path='])
     for opt, a in optlist:
         if opt in ('-h', '--help'):
             usage()
@@ -56,10 +100,20 @@ if __name__ == "__main__":
             snap_date = a
         if opt in ('-d', '--depth'):
             depth = int(a)
+        if opt in ('-p', '--path'):
+            path = a
 
     if args[0] == "?":
         usage()
-    (rubrik_host, host, fileset) = args
+    if args[2] == "nas":
+        (rubrik_host, host, fs_type, share, fileset) = args
+        if share.startswith("/"):
+            share_type = "NFS"
+        else:
+            share_type = "SMB"
+            path = "\\"
+    elif args[2] == "host":
+        (rubrik_host, host, fs_type, fileset) = args
     if user == "":
         user = raw_input("User: ")
     if password == "":
@@ -72,15 +126,32 @@ if __name__ == "__main__":
     utc_zone = pytz.timezone("UTC")
     snap_date = local_zone.localize(snap_date)
     snap_date = snap_date.astimezone(pytz.utc)
-    rubrik_fileset = rubrik_api.get('v1', '/fileset')
-    for fs in rubrik_fileset['data']:
-        if fs['hostName'] == host and fs['name'] == fileset:
-            fs_id = fs['id']
-            break
+    if fs_type == "host":
+        rubrik_fileset = rubrik_api.get('v1', '/fileset?name=' + fileset + '&host=' + host)
+        for fs in rubrik_fileset['data']:
+            if fs['hostName'] == host and fs['name'] == fileset:
+                fs_id = fs['id']
+                break
+    elif fs_type == "nas":
+        rubrik_hostshare = rubrik_api.get('internal', '/host/share?share_type' + share_type)
+        for hs in rubrik_hostshare['data']:
+            if hs['hostname'] == host and hs['exportPoint'] == share:
+                hs_id = hs['id']
+                break
+        if hs_id == "":
+            sys.stderr.write("Can't find share\n")
+            exit(1)
+        rubrik_fileset = rubrik_api.get('v1', '/fileset?name=' + fileset + "&share_id=" + str(hs_id))
+        for fs in rubrik_fileset['data']:
+            if fs['name'] == fileset:
+                fs_id = fs['id']
+                break
     if fs_id == "":
         sys.stderr.write("Can't find fileset\n")
+        exit(1)
     rubrik_snaps = rubrik_api.get('v1', '/fileset/' + str(fs_id))
     for snap in rubrik_snaps['snapshots']:
+        slf = []
         sf = snap['date'].split(':')
         slf.append(sf[0])
         slf.append(sf[1])
@@ -96,9 +167,8 @@ if __name__ == "__main__":
     if snap_id == "":
         sys.stderr.write("Can't find snapshot\n")
         exit(2)
-    print snap_id
+    (tree_size[path], tree_files[path]) = walk_dir(rubrik_api, snap_id, path, {})
 
-
-
-
+    for x in sorted(tree_size.keys()):
+        print x + "," + str(tree_size[x]) + "," + str(tree_files[x])
 
