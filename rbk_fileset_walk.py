@@ -13,6 +13,10 @@ def usage():
     print "Usage goes here!"
     exit(0)
 
+def dprint(message):
+    if DEBUG:
+        print(message)
+
 def get_creds_from_file(file, array):
     with open(file) as fp:
         data = fp.read()
@@ -36,8 +40,10 @@ def walk_dir(rubrik_api, snap_id, path, parent_ent):
     done = False
     while not done:
         params = {"path": path, "offset": offset}
-        print params
-        print snap_id
+        dprint(params)
+        dprint(snap_id)
+        if VERBOSE:
+            print(". ")
         rubrik_walk = rubrik_api.get('v1', '/fileset/snapshot/' + str(snap_id) + '/browse', params=params)
         for dir_ent in rubrik_walk['data']:
             offset += 1
@@ -50,7 +56,7 @@ def walk_dir(rubrik_api, snap_id, path, parent_ent):
                 tree_files[path] += 1
                 if dir_ent['fileMode'] == "drive":
                     new_path = dir_ent['filename']
-                elif share_type == 'NFS':
+                elif share_type == 'NFS' or fs_type in ('linux', 'unix'):
                     if path != "/":
                         new_path = path + "/" + dir_ent['path']
                     else:
@@ -85,8 +91,11 @@ if __name__ == "__main__":
     tree_size = {}
     fs_type = ""
     hs_id = ""
+    share_type = ""
+    DEBUG = False
+    VERBOSE = False
 
-    optlist, args = getopt.getopt(sys.argv[1:], 'hc:t:dp:', ['--help', '--creds=', '--timestamp=', '--depth=', '--path='])
+    optlist, args = getopt.getopt(sys.argv[1:], 'hc:t:dp:Dv', ['--help', '--creds=', '--timestamp=', '--depth=', '--path=', '--DEBUG', '--VERBOSE'])
     for opt, a in optlist:
         if opt in ('-h', '--help'):
             usage()
@@ -102,7 +111,10 @@ if __name__ == "__main__":
             depth = int(a)
         if opt in ('-p', '--path'):
             path = a
-
+        if opt in ('-D', '--DEBUG'):
+            DEBUG = True
+        if opt in ('-v', '--VERBOSE'):
+            VERBOSE = True
     if args[0] == "?":
         usage()
     if args[2] == "nas":
@@ -112,12 +124,19 @@ if __name__ == "__main__":
         else:
             share_type = "SMB"
             path = "\\"
-    elif args[2] == "host":
+    elif args[2] == "windows":
         (rubrik_host, host, fs_type, fileset) = args
+        path = "\\"
+    elif args[2] == "unix" or args[2] == "linux":
+        (rubrik_host, host, fs_type, fileset) = args
+        path = "/"
+    else:
+        sys.stderr.write("Invalid fileset type: " + args[2] + "\n")
+        exit(2)
     if user == "":
         user = raw_input("User: ")
     if password == "":
-        password = getpass.getpass("Passoword: ")
+        password = getpass.getpass("Password: ")
     rubrik_api = rubrik_cdm.Connect(rubrik_host, user, password)
     rubrik_config = rubrik_api.get('v1', '/cluster/me')
     rubrik_tz = rubrik_config['timezone']['timezone']
@@ -126,7 +145,7 @@ if __name__ == "__main__":
     utc_zone = pytz.timezone("UTC")
     snap_date = local_zone.localize(snap_date)
     snap_date = snap_date.astimezone(pytz.utc)
-    if fs_type == "host":
+    if fs_type in ('windows', 'linux', 'unix'):
         rubrik_fileset = rubrik_api.get('v1', '/fileset?name=' + fileset + '&host=' + host)
         for fs in rubrik_fileset['data']:
             if fs['hostName'] == host and fs['name'] == fileset:
@@ -147,7 +166,7 @@ if __name__ == "__main__":
                 fs_id = fs['id']
                 break
     if fs_id == "":
-        sys.stderr.write("Can't find fileset\n")
+        sys.stderr.write("Can't find fileset: " + fileset + "\n")
         exit(1)
     rubrik_snaps = rubrik_api.get('v1', '/fileset/' + str(fs_id))
     for snap in rubrik_snaps['snapshots']:
@@ -169,6 +188,7 @@ if __name__ == "__main__":
         exit(2)
     (tree_size[path], tree_files[path]) = walk_dir(rubrik_api, snap_id, path, {})
 
+    print ('\n')
     for x in sorted(tree_size.keys()):
         print x + "," + str(tree_size[x]) + "," + str(tree_files[x])
 
